@@ -533,7 +533,7 @@ class SCADE_Builder:
 
 
     # 根据类型创建，这里的type不是string
-    def create_local_E(self, type, local_name="Local1"):
+    def create_local_E(self, type_obj, local_name="Local1"):
         if self.current_canvas is None:
             print("❌ 当前未选择 Operator")
             return None
@@ -544,15 +544,38 @@ class SCADE_Builder:
                 print(f"⚠️ 输入名 '{local_name}' 已存在于 Canvas '{self.current_canvas.getName()}' 中，拒绝添加。")
                 return existing_local
 
-        # 关键：克隆 type_obj，避免“引用转移”
-        new_named_type = self.theScadeFactory.createNamedType()
-        new_named_type.setType(type.getType())  # 复制 Type 引用，而不是直接共享整个 NamedType
+            # 使用 clone_type() 深拷贝，避免“引用转移”
+        cloned_type = self.clone_type(type_obj)
 
         Local = self.theScadeFactory.createVariable()
         Local.setName(local_name)
-        Local.setType(new_named_type)
+        Local.setType(cloned_type)
         self.current_canvas.getLocals().add(Local)
         return Local
+
+
+    def clone_type(self, type_obj):
+        """
+        深度克隆 Type（NamedType、Table），包括 size 的深拷贝。
+        """
+        type_name = type_obj.eClass().getName()
+        if type_name == "NamedType":
+            new_named_type = self.theScadeFactory.createNamedType()
+            new_named_type.setType(type_obj.getType())  # 这里可直接引用
+            return new_named_type
+        elif type_name == "Table":
+            new_table = self.theScadeFactory.createTable()
+            # 深拷贝 size
+            orig_size = type_obj.getSize()
+            new_size = self.theScadeFactory.createConstValue()
+            new_size.setValue(orig_size.getValue())  # 只复制 value
+            new_table.setSize(new_size)
+            # 递归克隆子类型
+            new_table.setType(self.clone_type(type_obj.getType()))
+            return new_table
+        else:
+            print(f"⚠️ 不支持克隆的 Type 类型: {type_name}")
+            return type_obj
 
 
     def save_project(self):
@@ -834,9 +857,7 @@ class SCADE_Builder:
         self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
 
         for index, input in enumerate(expr['inputs']):
-            # Edge1
             GE1 = self.lx_to_ge[self.current_full_dir][input]
-            # Edge
             self.create_Edge(GE1, GE2, 1, index + 1)
 
 
@@ -860,9 +881,8 @@ class SCADE_Builder:
 
             elif var_kind == "Local":
                 print(f"🟡 {var.getName()}是一个用于读取的局部变量")
-                _L1 = var
                 idExpr = self.theScadeFactory.createIdExpression()
-                idExpr.setPath(_L1)
+                idExpr.setPath(var)
                 rightExpr.getCallParameters().add(idExpr)
 
             else:
@@ -888,7 +908,7 @@ class SCADE_Builder:
         for index, output in enumerate(expr['outputs']):
             # GE2
             if index == 0:
-                GE2 = self.create_EquationGE(Equation, output, 5000, 1000, 1000, 1600)
+                GE2 = self.create_EquationGE(Equation, output, 5000, 1000, 1500, 2600)
             else:
                 self.lx_to_ge[self.current_full_dir][output] = GE2
 
@@ -897,10 +917,161 @@ class SCADE_Builder:
         self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
 
         for index, input in enumerate(expr['inputs']):
-            # Edge1
             GE1 = self.lx_to_ge[self.current_full_dir][input]
-            # Edge
             self.create_Edge(GE1, GE2, 1, index + 1)
+
+
+    def create_mapfoldwi_equation(self, expr):
+        operator = expr['operator']
+        subOperator = expr['subOperator']
+        accumulators = expr['accumulators']
+        size = expr['size']
+        cond = expr['condition']
+        print(f"🔵 Processing Operator: {operator} and {subOperator}")
+        GE2 = None
+
+        Equation = self.theScadeFactory.createEquation()
+        calledOp = self.find_operator(subOperator)
+
+        input_count = len(calledOp.getInputs())
+        output_count = len(calledOp.getOutputs())
+        if input_count != len(expr['inputs']) + 1 or output_count != len(expr['outputs']) + 1:
+            print(f"⚠️ 输入数量不一致或输出数量不一致！")
+            print(f"    subOperator 输入数: {input_count}")
+            print(f"    表达式输入数: {len(expr['inputs'])}")
+            print(f"    subOperator 输出数: {output_count}")
+            print(f"    表达式输出数: {len(expr['outputs'])}")
+            print(f"⚠️ 是一个输入变量，buildInOperator不能直接读取，发生错误！")
+            return
+
+        opObj = self.theScadeFactory.createOpCall()
+        opObj.setOperator(calledOp)
+        opObj.setName("calledOp")
+
+        iteratorOp = self.theScadeFactory.createPartialIteratorOp()
+        iteratorOp.setName("abc")
+        iteratorOp.setIterator("mapfoldwi")
+        iteratorOp.setAccumulatorCount(accumulators)
+        iteratorOp.setOperator(opObj)
+
+        # size设定
+        contvalue = self.theScadeFactory.createConstValue()
+        contvalue.setValue(size)
+        iteratorOp.setSize(contvalue)
+
+        # default输入条件设定 数量为被调operator输出数目-accumulators-1
+        list = self.theScadeFactory.createListExpression()
+        for idx in range(output_count - int(accumulators) - 1):
+            idExpr = self.theScadeFactory.createIdExpression()
+            # idExpr.setPath(var) 暂时不考虑自动设置，先手动设置
+            list.getItems().add(idExpr)
+        iteratorOp.setDefault(list)
+
+        # if条件设定
+        var_kind, var = self.determine_var_kind(cond)
+        if var_kind == "Input":
+            print(f"⚠️ {var.getName()}是一个输入变量，buildInOperator不能直接读取，发生错误！")
+            return
+        elif var_kind == "Local":
+            print(f"🟡 {var.getName()}是一个用于读取的局部变量")
+            idExpr = self.theScadeFactory.createIdExpression()
+            idExpr.setPath(var)
+            iteratorOp.setIf(idExpr)
+        else:
+            print(f"⚠️ 未找到输入变量{var.getName()}，发生错误！")
+            return
+
+        callExpression = self.theScadeFactory.createCallExpression()
+        callExpression.setOperator(iteratorOp)
+
+        for input in expr['inputs']:
+            var_kind, var = self.determine_var_kind(input)
+            if var_kind == "Input":
+                print(f"⚠️ {var.getName()}是一个输入变量，buildInOperator不能直接读取，发生错误！")
+                return
+
+            elif var_kind == "Local":
+                print(f"🟡 {var.getName()}是一个用于读取的局部变量")
+                idExpr = self.theScadeFactory.createIdExpression()
+                idExpr.setPath(var)
+                callExpression.getCallParameters().add(idExpr)
+
+            else:
+                print(f"⚠️ 未找到输入变量{var.getName()}，发生错误！")
+                return
+
+        # mapfoldwi第1个输出是index
+        _Lindex = builder.create_local("_L011", "int32")
+        Equation.getLefts().add(_Lindex)
+
+        # mapfoldwi第2个输出是enable
+        _Lenable = builder.create_local("_L022", "bool")
+        Equation.getLefts().add(_Lenable)
+
+        # mapfoldwi第3个之后的输出才是有意义的
+        for index, output in enumerate(expr['outputs']):
+            var_kind, var = self.determine_var_kind(output)
+            # 参与acc迭代的输出类型不变
+            if index < int(accumulators):
+                if var_kind == "Output":
+                    print(f"⚠️ 对输出{output}计算后赋值，发生错误！")
+                    # TODO 例如：Output_01 = / (_L2, _L3)的情况处理
+                    # _L2 = self.create_local_E(outType, out)
+                    # self.create_output_equation("_L2", output)
+                    return
+
+                elif var_kind == "Local":
+                    print(f"⚠️ 局部变量{output}被再次写入，发生错误！")
+                    return
+
+                else:
+                    print(f"🟡 未找到变量{output}, 开始创建")
+                    outType = self.get_output_port_data_type(calledOp, index)
+                    _L2 = self.create_local_E(outType, output)
+                    Equation.getLefts().add(_L2)
+
+            # 不参与acc的为数组，需要升高维度，用table
+            else:
+                if var_kind == "Output":
+                    print(f"⚠️ 对输出{output}计算后赋值，发生错误！")
+                    # TODO 例如：Output_01 = / (_L2, _L3)的情况处理
+                    # _L2 = self.create_local_E(outType, out)
+                    # self.create_output_equation("_L2", output)
+                    return
+
+                elif var_kind == "Local":
+                    print(f"⚠️ 局部变量{output}被再次写入，发生错误！")
+                    return
+
+                else:
+                    print(f"🟡 未找到变量{output}, 开始创建")
+                    outType = self.get_output_port_data_type(calledOp, index)
+                    baseType = outType.getType().getName()
+                    type_name = baseType + "^" + size
+                    type_obj = self.create_type_from_string(type_name)
+                    _L2 = self.create_local_E(type_obj, output)
+                    Equation.getLefts().add(_L2)
+
+        for index, output in enumerate(expr['outputs']):
+            # GE2
+            if index == 0:
+                GE2 = self.create_EquationGE(Equation, output, 5000, 1000, 2000, 3000)
+            else:
+                self.lx_to_ge[self.current_full_dir][output] = GE2
+
+        Equation.setRight(callExpression)
+        self.current_canvas.getData().add(Equation)
+        self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
+
+        # if条件的连线
+        GE1 = self.lx_to_ge[self.current_full_dir][cond]
+        self.create_Edge(GE1, GE2, 1, 1)
+
+        # 输入的连线
+        for index, input in enumerate(expr['inputs']):
+            GE1 = self.lx_to_ge[self.current_full_dir][input]
+            self.create_Edge(GE1, GE2, 1, index + 2)
+
 
     def get_output_port_data_type(self, operator, index: int):
         """
@@ -991,7 +1162,6 @@ class SCADE_Builder:
             transition_oid = self.generate_oid(f"SM{sm_name}{source_name}{target_name}T")
             self.EditorPragmasUtil.setOid(transition, transition_oid)
 
-
             # 设置条件表达式（如果给了）
             if condition_expr:
                 var_kind_i, var_i = self.determine_var_kind("_L1")
@@ -1028,8 +1198,63 @@ class SCADE_Builder:
             return {"outputs": outputs[0], "inputs": inputs[0]}
         return None
 
+    def parse_mapfoldwi_expression(self, expr_line: str) -> dict:
+        """
+        解析形如:
+        _L4, _L5, _L6, _L7 = (mapfoldwi 2 Operator2 <<5>> if _L1)(_L2, _L3)
+        返回一个 dict:
+        {
+            'outputs': ['_L4', '_L5', '_L6', '_L7'],
+            'operator': 'mapfoldwi',
+            'suboperator': 'Operator2',
+            'accumulators': '2',
+            'size': '5',
+            'condition': '_L1',
+            'inputs': ['_L2', '_L3']
+        }
+        """
+        # 提取 = 左侧
+        left_right = expr_line.split('=')
+        if len(left_right) != 2:
+            raise ValueError(f"无效的 mapfoldwi 表达式: {expr_line}")
 
-    def parse_text_block(self, text):
+        left_part = left_right[0].strip()
+        right_part = left_right[1].strip()
+        outputs = [o.strip() for o in left_part.split(',')]
+
+        # operator 部分: (mapfoldwi 2 Operator2 <<5>> if _L1)
+        op_pattern = r"\((mapfoldwi)\s+(\d+)\s+([a-zA-Z0-9_]+)\s+<<\s*(\d+)\s*>>\s+if\s+([a-zA-Z0-9_]+)\)"
+        op_match = re.search(op_pattern, right_part)
+        if not op_match:
+            raise ValueError(f"无法解析 operator 部分: {expr_line}")
+
+        operator = op_match.group(1)
+        accumulators = op_match.group(2)
+        suboperator = op_match.group(3)
+        size = op_match.group(4)
+        condition = op_match.group(5)
+
+        # inputs 部分: (...) 在 operator 部分之后
+        input_pattern = r"\)\s*\((.*?)\)"
+        input_match = re.search(input_pattern, right_part)
+        if not input_match:
+            raise ValueError(f"无法解析 inputs 部分: {expr_line}")
+
+        inputs_str = input_match.group(1)
+        inputs = [i.strip() for i in inputs_str.split(',')]
+
+        return {
+            'outputs': outputs,
+            'operator': operator,
+            'subOperator': suboperator,
+            'accumulators': accumulators,
+            'size': size,
+            'condition': condition,
+            'inputs': inputs
+        }
+
+
+    def parse_text_block1(self, text):
         expressions = []
         for line in text.strip().splitlines():
             parsed = self.parse_expression_line(line)
@@ -1058,6 +1283,47 @@ class SCADE_Builder:
                     print(f"⚠️ 无法识别赋值类型: {right} = {left}")
 
 
+    def parse_text_block(self, text):
+        expressions = []
+        for line in text.strip().splitlines():
+            # 判断是否是 mapfoldwi 语句
+            if "mapfoldwi" in line:
+                parsed = self.parse_mapfoldwi_expression(line)
+            else:
+                parsed = self.parse_expression_line(line)
+
+            if parsed:
+                expressions.append(parsed)
+
+        self.expressions = expressions  # 保存到对象属性
+
+        for expr in expressions:
+            # mapfoldwi 需要特殊处理
+            if expr.get('operator') == "mapfoldwi":
+                self.create_mapfoldwi_equation(expr)  # 你自己实现它
+                continue
+
+            # 其他操作符的情况
+            if 'operator' in expr and expr['operator']:
+                # self.create_buildInOperator_equation(expr)
+                self.create_operator_equation(expr)
+            else:
+                # 赋值类
+                left = expr.get('outputs')
+                right = expr.get('inputs')
+                # 判断右侧是否为输入变量
+                right_kind, _ = self.determine_var_kind(right)
+                # 判断左侧是否为输出变量
+                left_kind, _ = self.determine_var_kind(left)
+
+                if right_kind == "Input":
+                    self.create_input_equation(right, left)
+                elif left_kind == "Output":
+                    self.create_output_equation(right, left)
+                else:
+                    print(f"⚠️ 无法识别赋值类型: {right} = {left}")
+
+
 
 if __name__ == "__main__":
     # 示例文本
@@ -1065,7 +1331,7 @@ if __name__ == "__main__":
     _L1 = Input_01
     _L2 = Input_02
     _L3 = Input_03
-    _L4, _L5, _L8, _L3 = mapfoldwi Operator2  if _L7 default (_L9)(_L1, _L6)
+    _L4, _L5 = (mapfoldwi 1 Operator2 <<5>> if _L1)(_L2, _L3)
     Output_01 = _L4
     Output_02 = _L5
     """
@@ -1088,12 +1354,12 @@ if __name__ == "__main__":
     builder.create_operator("Operator3")
     builder.create_operator_diagram("operator3_diagram")
 
-    builder.create_input("Input_01", "float64")
-    builder.create_input("Input_02", "float64")
-    builder.create_input("Input_03", "float64")
+    builder.create_input("Input_01", "bool")
+    builder.create_input("Input_02", "bool")
+    builder.create_input("Input_03", "bool^5")
 
-    builder.create_output("Output_01", "float64")
-    builder.create_output("Output_02", "float64")
+    builder.create_output("Output_01", "bool")
+    builder.create_output("Output_02", "bool^5")
 
     # builder.create_local("uint32", "Input222")
 
