@@ -39,6 +39,58 @@ class SCADE_Builder:
         self.lx_to_ge = {}
         self.lx_to_ge[self.current_full_dir] = {}
 
+        self.counters = {}
+
+        # 🟡 操作符映射表（用户输入 -> SCADE API 内部使用的操作符号）
+        self.OPERATOR_MAPPING = {
+            # 关系运算符
+            "<": "&lt;",
+            "<=": "&lt;=",
+            ">": "&gt;",
+            ">=": "&gt;=",
+            "!=": "&lt;&gt;",
+            "<>": "&lt;&gt;",
+            "==": "=",
+
+            # 移位运算
+            "<<": "lsl",
+            ">>": "lsr",
+
+            # 算术运算
+            "+": "+",
+            "-": "-",
+            "*": "*",
+            "/": "/",
+            "mod": "mod",
+            "=": "=",
+
+            # 逻辑运算
+            "and": "and",
+            "or": "or",
+            "not": "not",
+            "xor": "xor",
+
+            # 位运算
+            "land": "land",
+            "lor": "lor",
+            "lnot": "lnot",
+            "lxor": "lxor",
+
+            # 特殊运算
+            "pre": "pre",
+            "fby": "fby",
+            "cast": "cast"
+        }
+
+    def generate_suffix(self, base_str: str) -> str:
+        if base_str not in self.counters:
+            self.counters[base_str] = 1
+        else:
+            self.counters[base_str] += 1
+        return f"{base_str}_{self.counters[base_str]}"
+
+    def generate_oid(self, prefix="!ed"):
+        return f"{prefix}/{str(uuid.uuid4()).upper().replace('-', '/')}"
 
     def start_jvm(self,
                   jvm_path=None,
@@ -261,8 +313,7 @@ class SCADE_Builder:
         return None
 
 
-    def generate_oid(self, prefix="!ed"):
-        return f"{prefix}/{str(uuid.uuid4()).upper().replace('-', '/')}"
+
 
 
     def create_package(self, package_name: str):
@@ -783,6 +834,169 @@ class SCADE_Builder:
         else:
             print(f"⚠️ 未找到输出{var.getName()}")
 
+    def create_numeric_cast_op(self, input_var_name: str, output_var_name: str, target_type: str):
+        """
+        创建一个 NumericCastOp，转换 input_var_name 为 target_type，结果存到 output_var_name。
+        """
+        # 创建等式
+        Equation = self.theScadeFactory.createEquation()
+
+        # 获取输入变量对象
+        var_kind, input_var = self.determine_var_kind(input_var_name)
+        if var_kind is None or input_var is None:
+            raise ValueError(f"❌ 未找到输入变量: {input_var_name}")
+
+        # 创建 NumericCastOp
+        cast_op = self.theScadeFactory.createNumericCastOp()
+        #cast_op.setOperator("1")  # API中 cast operator 是 "1"
+
+        # 设置目标类型
+        type_obj = self.find_typeObject(target_type)
+        if type_obj is None:
+            raise ValueError(f"❌ 未找到目标类型: {target_type}")
+        cast_op.setType(type_obj)
+
+        # 设置输入 flow（IdExpression）
+        id_expr = self.theScadeFactory.createIdExpression()
+        id_expr.setPath(input_var)
+        cast_op.setFlow(id_expr)
+
+        # 创建/获取输出变量
+        outType = type_obj  # 这里输出类型就是目标类型
+        _Lout = self.create_local_E(outType, output_var_name)
+
+        # 将输出放到等式左边，右边是 NumericCastOp
+        Equation.getLefts().add(_Lout)
+        Equation.setRight(cast_op)
+
+        # 加入到 canvas
+        self.current_canvas.getData().add(Equation)
+
+        # 生成图形化元素 GE
+        self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
+
+        # 生成 OID
+        self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
+
+        print(f"✅ 已创建 NumericCastOp: {input_var_name} -> {output_var_name} (type: {target_type})")
+        return Equation
+
+    def create_pre_equation(self, input_var_name: str, output_var_name: str):
+        """
+        在当前 Operator 中创建 pre 操作等式：
+            output_var_name = pre input_var_name;
+        - input_var_name: 输入变量名称
+        - output_var_name: 输出变量名称
+        """
+        if self.current_canvas is None:
+            print("❌ 当前未选择 Operator/Canvas")
+            return None
+
+        # 创建等式
+        Equation = self.theScadeFactory.createEquation()
+
+        # 创建 PreOp
+        pre_op = self.theScadeFactory.createPreOp()
+        pre_op.setOperator("pre")  # pre 的操作符
+
+        # 创建 ListExpression（作为 pre 的 flow）
+        list_expr = self.theScadeFactory.createListExpression()
+
+        # 创建 IdExpression，指向输入变量
+        var_kind, input_var = self.determine_var_kind(input_var_name)
+        if var_kind is None or input_var is None:
+            print(f"❌ 未找到输入变量: {input_var_name}")
+            return None
+
+        id_expr = self.theScadeFactory.createIdExpression()
+        id_expr.setPath(input_var)
+        list_expr.getItems().add(id_expr)
+
+        # 设置 flow
+        pre_op.setFlow(list_expr)
+
+        # 创建/获取输出变量
+        outType = input_var.getType()  # pre 的输出类型通常等于输入变量的类型
+        _Lout = self.create_local_E(outType, output_var_name)
+
+        # 设置等式的左右两边
+        Equation.getLefts().add(_Lout)
+        Equation.setRight(pre_op)
+
+        # 将等式加入到 canvas
+        self.current_canvas.getData().add(Equation)
+
+        # 创建可视化 GE
+        self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
+
+        # 生成 OID
+        self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
+
+        print(f"✅ 已创建 pre 等式: {output_var_name} = pre {input_var_name};")
+        return Equation
+
+    def create_fby_equation(self, input_var_name: str, delay_value: str, default_var_name: str, output_var_name: str):
+        """
+        在当前 Operator 中创建 fby 操作等式：
+            output_var_name = fby(init_var; delay; next_var);
+        - input_var_name: 输入变量名称
+        - delay_value: 延迟值（字符串/数字）
+        - default_var_name: 默认值输入变量名称
+        - output_var_name: 输出变量名称
+        """
+        if self.current_canvas is None:
+            print("❌ 当前未选择 Operator/Canvas")
+            return None
+
+        # 创建等式
+        Equation = self.theScadeFactory.createEquation()
+
+        # 创建 FbyOp
+        fby_op = self.theScadeFactory.createFbyOp()
+        fby_op.setOperator("fby")  # fby 的操作符
+
+        # flows：初始值
+        var_kind, input_var = self.determine_var_kind(input_var_name)
+        if var_kind is None or input_var is None:
+            print(f"❌ 未找到初始值变量: {input_var_name}")
+            return None
+        id_expr_input = self.theScadeFactory.createIdExpression()
+        id_expr_input.setPath(input_var)
+        fby_op.getFlows().add(id_expr_input)
+
+        # delay：延迟值
+        const_delay = self.theScadeFactory.createConstValue()
+        const_delay.setValue(str(delay_value))
+        fby_op.setDelay(const_delay)
+
+        # values：下一个值
+        var_kind, default_var = self.determine_var_kind(default_var_name)
+        if var_kind is None or default_var is None:
+            print(f"❌ 未找到下一个值变量: {default_var_name}")
+            return None
+        id_expr_default = self.theScadeFactory.createIdExpression()
+        id_expr_default.setPath(default_var)
+        fby_op.getValues().add(id_expr_default)
+
+        # 创建/获取输出变量
+        outType = input_var.getType()  # fby 输出类型等于输入值类型
+        _Lout = self.create_local_E(outType, output_var_name)
+
+        # 设置等式左右
+        Equation.getLefts().add(_Lout)
+        Equation.setRight(fby_op)
+
+        # 加入到 canvas
+        self.current_canvas.getData().add(Equation)
+
+        # 创建可视化 GE
+        self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
+
+        # 生成 OID
+        self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
+
+        print(f"✅ 已创建 fby 等式: {output_var_name} = fby({input_var_name}; {delay_value}; {default_var_name});")
+        return Equation
 
     def create_buildInOperator_equation(self, expr):
         operator = expr['operator']
@@ -791,32 +1005,64 @@ class SCADE_Builder:
         opObj = None
         outType = None # 类型推理
         GE2 = None
+        input_number = len(expr['inputs'])
 
+        operator = self.OPERATOR_MAPPING.get(operator, operator)
         if operator in {"+", "*", "and", "or", "xor", "land", "lor"}:
             opObj = self.theScadeFactory.createNAryOp()
             opObj.setOperator(operator)
-        elif operator in {"not", "lnot"}:
-            opObj = self.theScadeFactory.createUnaryOp()
-            opObj.setOperator(operator)
-            # 添加一个操作数
-            # ... 你的处理逻辑 ...
-        elif operator in {"-", "/", "mod", "&lt;", "&lt;=", "&gt;", "&gt;=", "&lt;&gt;", "=", "lxor", "lsl", "lsr"}:
-            opObj = self.theScadeFactory.createBinaryOp()
-            opObj.setOperator(operator)
-            # 添加两个操作数
-            # ... 你的处理逻辑 ...
-        elif operator in {"1"}:
-            opObj = self.theScadeFactory.createNumericCastOp()
-            opObj.setOperator(operator)
-            # ... 你的处理逻辑 ...
+        elif operator in {"-", "/", "mod", "&lt;", "&lt;=", "&gt;", "&gt;=", "&lt;&gt;", "=", "not", "lnot", "lxor", "lsl", "lsr"}:
+            # 负号的单目特殊处理
+            if operator == "-" and input_number == 1:
+                opObj = self.theScadeFactory.createUnaryOp()
+                opObj.setOperator(operator)
+            else:
+                opObj = self.theScadeFactory.createBinaryOp()
+                opObj.setOperator(operator)
         elif operator in {"pre"}:
-            opObj = self.theScadeFactory.createPreOp()
-            opObj.setOperator(operator)
+            # 确保只有一个输入
+            if input_number != 1:
+                raise ValueError("⚠️ cast 操作符只接受一个输入")
+
+            input_name = expr['inputs'][0]
+            var_kind, var = self.determine_var_kind(input_name)
+            if var_kind != "Local":
+                raise ValueError(f"⚠️ cast 操作的输入必须是局部变量，而不是: {var_kind}")
+            output_name = expr['outputs'][0]
+            self.create_pre_equation(input_name, output_name)
+            return
         elif operator in {"fby"}:
-            opObj = self.theScadeFactory.createFbyOp()
-            opObj.setOperator(operator)
-            # 添加多个操作数
-            # ... 你的处理逻辑 ...
+            input_name = expr['inputs'][0]
+            var_kind, var = self.determine_var_kind(input_name)
+            if var_kind != "Local":
+                raise ValueError(f"⚠️ cast 操作的输入必须是局部变量，而不是: {var_kind}")
+            delay_value = expr['inputs'][1]
+            default_value = expr['inputs'][2]
+            output_name = expr['outputs'][0]
+            self.create_fby_equation(input_name, delay_value, default_value, output_name)
+            return
+        elif operator in {"cast"}:
+            # cast 操作：用 NumericCastOp
+            # 确保只有一个输入
+            if input_number != 1:
+                raise ValueError("⚠️ cast 操作符只接受一个输入")
+
+            # 提取目标类型（expr 里应有 target_type 字段）
+            target_type = expr['inputs'][1]
+            if not target_type:
+                raise ValueError("⚠️ cast 操作缺少目标类型信息！")
+
+            input_name = expr['inputs'][0]
+            var_kind, var = self.determine_var_kind(input_name)
+            if var_kind != "Local":
+                raise ValueError(f"⚠️ cast 操作的输入必须是局部变量，而不是: {var_kind}")
+
+            output_name = expr['outputs'][0]
+
+            self.create_numeric_cast_op(input_name, output_name, target_type)
+            return
+        else:
+            raise ValueError(f"未知操作符: {expr}")
             
         for input in expr['inputs']:
             var_kind, var = self.determine_var_kind(input)
@@ -870,7 +1116,7 @@ class SCADE_Builder:
         calledOp = self.find_operator(operator)
         opObj = self.theScadeFactory.createOpCall()
         opObj.setOperator(calledOp)
-        opObj.setName("calledOp")
+        opObj.setName(self.generate_suffix("_LcalledOp"))
         rightExpr = self.theScadeFactory.createCallExpression()
         rightExpr.setOperator(opObj)
 
@@ -946,10 +1192,10 @@ class SCADE_Builder:
 
         opObj = self.theScadeFactory.createOpCall()
         opObj.setOperator(calledOp)
-        opObj.setName("calledOp")
+        opObj.setName(self.generate_suffix("_LcalledOp"))
 
         iteratorOp = self.theScadeFactory.createPartialIteratorOp()
-        iteratorOp.setName("abc")
+        iteratorOp.setName(self.generate_suffix("_LiteratorOp"))
         iteratorOp.setIterator("mapfoldwi")
         iteratorOp.setAccumulatorCount(accumulators)
         iteratorOp.setOperator(opObj)
@@ -1001,11 +1247,11 @@ class SCADE_Builder:
                 return
 
         # mapfoldwi第1个输出是index
-        _Lindex = builder.create_local("_L011", "int32")
+        _Lindex = builder.create_local(self.generate_suffix("_Lmapfoldwi"), "int32")
         Equation.getLefts().add(_Lindex)
 
         # mapfoldwi第2个输出是enable
-        _Lenable = builder.create_local("_L022", "bool")
+        _Lenable = builder.create_local(self.generate_suffix("_Lmapfoldwi"), "bool")
         Equation.getLefts().add(_Lenable)
 
         # mapfoldwi第3个之后的输出才是有意义的
@@ -1094,20 +1340,19 @@ class SCADE_Builder:
         return data_type
 
 
-    def create_operator_diagram(self, diagramName: str):
-        self.Operator_Pragma = self.theEditorPragmasFactory.createOperator()
-        self.Operator_Pragma.setNodeKind("graphical")
+    def create_diagram(self, diagramName: str):
         self.Operator_Diagram = self.theEditorPragmasFactory.createNetDiagram()
         self.Operator_Diagram.setName(diagramName)
         self.Operator_Diagram.setFormat("A4 (210 297)")
         self.Operator_Diagram.setLandscape(True)
         self.Operator_Diagram.setOid(self.generate_oid())
+        self.Operator_Pragma = self.theEditorPragmasFactory.createOperator()
+        self.Operator_Pragma.setNodeKind("graphical")
         self.Operator_Pragma.getDiagrams().add(self.Operator_Diagram)
         self.current_canvas.getPragmas().add(self.Operator_Pragma)
 
 
-    def create_state_machine_with_transitions(self, sm_name: str, states: list[str],
-                                              transitions: list[tuple[str, str, str]]):
+    def create_stateMachine(self, sm_name: str, states: list[str], transitions: list[tuple[str, str, str]]):
         """
         创建一个状态机，添加状态和 transitions。
         - sm_name: 状态机名称
@@ -1117,6 +1362,8 @@ class SCADE_Builder:
         if self.current_operator is None:
             print("❌ 当前未选择 Operator")
             return None
+
+        self.create_diagram(self.generate_suffix("SM_diagram"))
 
         # 创建状态机
         sm = self.theScadeFactory.createStateMachine()
@@ -1129,12 +1376,12 @@ class SCADE_Builder:
 
         # 创建状态
         state_objs = {}
-        x = 2000
-        y = 3000
+        x = 4000
+        y = 4000
         for idx, state_name in enumerate(states):
             state = self.theScadeFactory.createState()
             state.setName(state_name)
-            state_oid = self.generate_oid(f"SM{sm_name}{state_name}Oid")
+            state_oid = self.generate_oid(f"SM_{sm_name}{state_name}_Oid")
             self.EditorPragmasUtil.setOid(state, state_oid)
             self.create_StateGE(state, state_name, x, y)
             # 第一个状态设为初始态
@@ -1145,8 +1392,8 @@ class SCADE_Builder:
             sm.getStates().add(state)
             state_objs[state_name] = state
             print(f"✅ 创建状态: {state_name}")
-            x = x + 3000
-            y = y + 2000
+            x = x + 4000
+            y = y + 4000
 
         # 创建 transitions
         for source_name, target_name, condition_expr in transitions:
@@ -1159,12 +1406,12 @@ class SCADE_Builder:
 
             transition = self.theScadeFactory.createTransition()
             transition.setTarget(target_state)
-            transition_oid = self.generate_oid(f"SM{sm_name}{source_name}{target_name}T")
+            transition_oid = self.generate_oid(f"SM_{sm_name}{source_name}{target_name}_T")
             self.EditorPragmasUtil.setOid(transition, transition_oid)
 
             # 设置条件表达式（如果给了）
             if condition_expr:
-                var_kind_i, var_i = self.determine_var_kind("_L1")
+                var_kind_i, var_i = self.determine_var_kind(condition_expr)
                 rightExpr = self.theScadeFactory.createIdExpression()
                 rightExpr.setPath(var_i)
                 transition.setCondition(rightExpr)
@@ -1254,36 +1501,7 @@ class SCADE_Builder:
         }
 
 
-    def parse_text_block1(self, text):
-        expressions = []
-        for line in text.strip().splitlines():
-            parsed = self.parse_expression_line(line)
-            if parsed:
-                expressions.append(parsed)
-
-        for expr in expressions:
-            # 有操作符的情况
-            if 'operator' in expr and expr['operator']:
-                #self.create_buildInOperator_equation(expr)
-                self.create_operator_equation(expr)
-            else:
-                # 赋值类
-                left = expr.get('outputs')
-                right = expr.get('inputs')
-                # 判断右侧是否为输入变量
-                right_kind, _ = self.determine_var_kind(right)
-                # 判断左侧是否为输出变量
-                left_kind, _ = self.determine_var_kind(left)
-
-                if right_kind == "Input":
-                    self.create_input_equation(right, left)
-                elif left_kind == "Output":
-                    self.create_output_equation(right, left)
-                else:
-                    print(f"⚠️ 无法识别赋值类型: {right} = {left}")
-
-
-    def parse_text_block(self, text):
+    def create_dataFlow(self, text):
         expressions = []
         for line in text.strip().splitlines():
             # 判断是否是 mapfoldwi 语句
@@ -1296,6 +1514,7 @@ class SCADE_Builder:
                 expressions.append(parsed)
 
         self.expressions = expressions  # 保存到对象属性
+        self.create_diagram(self.generate_suffix("Dataflow_diagram"))
 
         for expr in expressions:
             # mapfoldwi 需要特殊处理
@@ -1305,8 +1524,11 @@ class SCADE_Builder:
 
             # 其他操作符的情况
             if 'operator' in expr and expr['operator']:
-                # self.create_buildInOperator_equation(expr)
-                self.create_operator_equation(expr)
+                operator_key = expr['operator']
+                if operator_key in self.OPERATOR_MAPPING:
+                    self.create_buildInOperator_equation(expr)
+                else:
+                    self.create_operator_equation(expr)
             else:
                 # 赋值类
                 left = expr.get('outputs')
@@ -1331,9 +1553,13 @@ if __name__ == "__main__":
     _L1 = Input_01
     _L2 = Input_02
     _L3 = Input_03
+    _L8 = Input_04
     _L4, _L5 = (mapfoldwi 1 Operator2 <<5>> if _L1)(_L2, _L3)
+    _L6, _L7 = (mapfoldwi 1 Operator2 <<15>> if _L1)(_L2, _L8)
     Output_01 = _L4
     Output_02 = _L5
+    Output_03 = _L6
+    Output_04 = _L7
     """
 
     builder = SCADE_Builder()
@@ -1352,22 +1578,23 @@ if __name__ == "__main__":
 
     #builder.create_package("Package1")
     builder.create_operator("Operator3")
-    builder.create_operator_diagram("operator3_diagram")
 
     builder.create_input("Input_01", "bool")
     builder.create_input("Input_02", "bool")
     builder.create_input("Input_03", "bool^5")
+    builder.create_input("Input_04", "bool^15")
 
     builder.create_output("Output_01", "bool")
     builder.create_output("Output_02", "bool^5")
+    builder.create_output("Output_03", "bool")
+    builder.create_output("Output_04", "bool^15")
 
     # builder.create_local("uint32", "Input222")
 
-    builder.parse_text_block(input_text)
+    builder.create_dataFlow(input_text)
 
     # 假设当前已经切换到目标 Operator
-    #builder.create_operator_diagram("SM1_diagram")
-    #builder.create_state_machine_with_transitions(
+    #builder.create_stateMachine(
     #    sm_name="SM1",
     #    states=["S1", "S2", "S3", "S4"],
     #    transitions=[
