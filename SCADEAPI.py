@@ -244,8 +244,11 @@ class SCADE_Builder:
                 operator_obj = op
                 break
         if operator_obj is None:
-            print(f"❌ 未找到 Operator: {operator_name}")
-            return None
+            self.current_package = current
+            self.current_operator = None
+            self.current_canvas = None
+            print(f"✅ 只切换到了 Package: {current.getName()}")
+            return current
 
         # 更新当前指针
         self.current_package = current
@@ -873,11 +876,15 @@ class SCADE_Builder:
         self.current_canvas.getData().add(Equation)
 
         # 生成图形化元素 GE
-        self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
+        GE2 = self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
 
         # 生成 OID
         self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
 
+        # 输入的连线
+        GE1 = self.lx_to_ge[self.current_full_dir][input_var_name]
+        self.create_Edge(GE1, GE2, 1, 1)
+        
         print(f"✅ 已创建 NumericCastOp: {input_var_name} -> {output_var_name} (type: {target_type})")
         return Equation
 
@@ -897,7 +904,6 @@ class SCADE_Builder:
 
         # 创建 PreOp
         pre_op = self.theScadeFactory.createPreOp()
-        pre_op.setOperator("pre")  # pre 的操作符
 
         # 创建 ListExpression（作为 pre 的 flow）
         list_expr = self.theScadeFactory.createListExpression()
@@ -927,10 +933,14 @@ class SCADE_Builder:
         self.current_canvas.getData().add(Equation)
 
         # 创建可视化 GE
-        self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
+        GE2 = self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
 
         # 生成 OID
         self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
+
+        # 输入的连线
+        GE1 = self.lx_to_ge[self.current_full_dir][input_var_name]
+        self.create_Edge(GE1, GE2, 1, 1)
 
         print(f"✅ 已创建 pre 等式: {output_var_name} = pre {input_var_name};")
         return Equation
@@ -938,7 +948,7 @@ class SCADE_Builder:
     def create_fby_equation(self, input_var_name: str, delay_value: str, default_var_name: str, output_var_name: str):
         """
         在当前 Operator 中创建 fby 操作等式：
-            output_var_name = fby(init_var; delay; next_var);
+            output_var_name = fby(input_var_name; delay_value; default_var_name);
         - input_var_name: 输入变量名称
         - delay_value: 延迟值（字符串/数字）
         - default_var_name: 默认值输入变量名称
@@ -953,7 +963,6 @@ class SCADE_Builder:
 
         # 创建 FbyOp
         fby_op = self.theScadeFactory.createFbyOp()
-        fby_op.setOperator("fby")  # fby 的操作符
 
         # flows：初始值
         var_kind, input_var = self.determine_var_kind(input_var_name)
@@ -969,14 +978,19 @@ class SCADE_Builder:
         const_delay.setValue(str(delay_value))
         fby_op.setDelay(const_delay)
 
-        # values：下一个值
-        var_kind, default_var = self.determine_var_kind(default_var_name)
-        if var_kind is None or default_var is None:
-            print(f"❌ 未找到下一个值变量: {default_var_name}")
-            return None
-        id_expr_default = self.theScadeFactory.createIdExpression()
-        id_expr_default.setPath(default_var)
-        fby_op.getValues().add(id_expr_default)
+        # default values：默认值
+        if default_var_name.startswith("_L"):
+            var_kind, default_var = self.determine_var_kind(default_var_name)
+            if var_kind is None or default_var is None:
+                print(f"❌ 未找到下一个值变量: {default_var_name}")
+                return None
+            id_expr_default = self.theScadeFactory.createIdExpression()
+            id_expr_default.setPath(default_var)
+            fby_op.getValues().add(id_expr_default)
+        else:
+            const_default = self.theScadeFactory.createConstValue()
+            const_default.setValue(str(default_var_name))
+            fby_op.getValues().add(const_default)
 
         # 创建/获取输出变量
         outType = input_var.getType()  # fby 输出类型等于输入值类型
@@ -990,10 +1004,17 @@ class SCADE_Builder:
         self.current_canvas.getData().add(Equation)
 
         # 创建可视化 GE
-        self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
+        GE2 = self.create_EquationGE(Equation, output_var_name, 5000, 1000, 1000, 1000)
 
         # 生成 OID
         self.EditorPragmasUtil.setOid(Equation, self.generate_oid())
+
+        # 输入的连线
+        GE1 = self.lx_to_ge[self.current_full_dir][input_var_name]
+        self.create_Edge(GE1, GE2, 1, 1)
+        if default_var_name.startswith("_L"):
+            GE1 = self.lx_to_ge[self.current_full_dir][default_var_name]
+            self.create_Edge(GE1, GE2, 1, 2)
 
         print(f"✅ 已创建 fby 等式: {output_var_name} = fby({input_var_name}; {delay_value}; {default_var_name});")
         return Equation
@@ -1022,12 +1043,12 @@ class SCADE_Builder:
         elif operator in {"pre"}:
             # 确保只有一个输入
             if input_number != 1:
-                raise ValueError("⚠️ cast 操作符只接受一个输入")
+                raise ValueError("⚠️ pre 操作符只接受一个输入")
 
             input_name = expr['inputs'][0]
             var_kind, var = self.determine_var_kind(input_name)
             if var_kind != "Local":
-                raise ValueError(f"⚠️ cast 操作的输入必须是局部变量，而不是: {var_kind}")
+                raise ValueError(f"⚠️ pre 操作的输入必须是局部变量，而不是: {var_kind}")
             output_name = expr['outputs'][0]
             self.create_pre_equation(input_name, output_name)
             return
@@ -1554,12 +1575,11 @@ if __name__ == "__main__":
     _L2 = Input_02
     _L3 = Input_03
     _L8 = Input_04
-    _L4, _L5 = (mapfoldwi 1 Operator2 <<5>> if _L1)(_L2, _L3)
-    _L6, _L7 = (mapfoldwi 1 Operator2 <<15>> if _L1)(_L2, _L8)
-    Output_01 = _L4
-    Output_02 = _L5
-    Output_03 = _L6
-    Output_04 = _L7
+
+    Output_01 = _L1
+    Output_02 = _L2
+    Output_03 = _L3
+    Output_04 = _L8
     """
 
     builder = SCADE_Builder()
@@ -1606,4 +1626,4 @@ if __name__ == "__main__":
     #)
 
     builder.save_project()
-    builder.shutdown_jvm()
+    #builder.shutdown_jvm()
